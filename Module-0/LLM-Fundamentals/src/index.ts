@@ -2,6 +2,9 @@ import Anthropic from "@anthropic-ai/sdk";
 
 const MODEL = "claude-haiku-5-5";
 
+// Override with the MAX_TOKENS environment variable, e.g. MAX_TOKENS=50
+const DEFAULT_MAX_TOKENS = 1024;
+
 // Claude Haiku 5.5 prices in USD per 1M tokens (as of 2026-11-27).
 // Source: https://platform.claude.com/docs/en/about-claude/pricing
 const INPUT_PRICE_PER_MTOK = 0.1;
@@ -27,6 +30,15 @@ function calculateCost(usage: Anthropic.Usage): number {
   );
 }
 
+// Returns null when the value is not a positive integer
+function parseMaxTokens(raw: string | undefined): number | null {
+  if (raw === undefined || raw.trim() === "") {
+    return DEFAULT_MAX_TOKENS;
+  }
+  const value = Number(raw);
+  return Number.isInteger(value) && value > 0 ? value : null;
+}
+
 async function main(): Promise<void> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
 
@@ -43,12 +55,20 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  const maxTokens = parseMaxTokens(process.env.MAX_TOKENS);
+  if (maxTokens === null) {
+    console.error(
+      `Error: MAX_TOKENS must be a positive integer, got "${process.env.MAX_TOKENS}".`,
+    );
+    process.exit(1);
+  }
+
   const client = new Anthropic({ apiKey });
 
   try {
     const response = await client.messages.create({
       model: MODEL,
-      max_tokens: 1024,
+      max_tokens: maxTokens,
       system:
         "You are a helpful assistant. Answer briefly and clearly in one sentence.",
       output_config: { effort: "low" },
@@ -66,17 +86,29 @@ async function main(): Promise<void> {
       .map((block) => block.text)
       .join("\n");
 
-    console.log(text);
+    // An empty answer would otherwise print a blank line with no explanation
+    const isEmptyAnswer = text.trim().length === 0;
+    if (isEmptyAnswer) {
+      const blockTypes = response.content.map((block) => block.type);
+      console.error("Error: the model returned no text answer.");
+      console.error(`Content blocks: [${blockTypes.join(", ")}]`);
+    } else {
+      console.log(text);
+    }
 
     // Printed to stderr so stdout contains only the answer
     const { input_tokens, output_tokens } = response.usage;
     const cost = calculateCost(response.usage);
     console.error(
-      `\nTokens: ${input_tokens} in / ${output_tokens} out | Cost: $${cost.toFixed(6)}`,
+      `\nTokens: ${input_tokens} in / ${output_tokens} out | Cost: $${cost.toFixed(6)} | Stop: ${response.stop_reason}`,
     );
 
     if (response.stop_reason === "max_tokens") {
       console.error("Warning: the answer was cut off at the max_tokens limit.");
+    }
+
+    if (isEmptyAnswer) {
+      process.exit(1);
     }
   } catch (error) {
     if (error instanceof Anthropic.AuthenticationError) {
@@ -94,4 +126,8 @@ async function main(): Promise<void> {
   }
 }
 
-main();
+// Safety net: any error that escapes main() still gets a clear message and exit code 1
+main().catch((error) => {
+  console.error("Unexpected error:", error);
+  process.exit(1);
+});
